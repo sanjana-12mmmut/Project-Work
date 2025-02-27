@@ -1,118 +1,136 @@
 # Project-Work
 # Simplified CAN Communication Simulation for SimDaaS Autonomy Pvt Ltd
-# Full Solution with Error Checking and Retry Mechanism
+
+1. Install Dependencies
+
+This project only uses Python's standard libraries, so no extra dependencies are needed. However, if you want to create a requirements.txt for reference:
+
+
+To install dependencies, run:
+
+pip install -r requirements.txt
+
+
+2. Python Code
+
+A. src/message_bus.py (Simulated CAN Bus)
+
+Handles message transmission between sensors and the controller using a queue.
+
+import queue
+
+class MessageBus:
+    def init(self):
+        self.bus = queue.Queue()  
+
+    def send(self, message):
+        self.bus.put(message)  
+
+    def receive(self):
+        if not self.bus.empty():
+            return self.bus.get() 
+        return None
+
+
+B. src/sensor_node.py (Sensor Nodes)
+
+Defines different sensor nodes that generate and send messages.
 
 import random
 import time
-import queue
-
-# Simulate a CAN bus using Python's queue
-can_bus = queue.Queue()
 
 class SensorNode:
-    """
-    Simulates a virtual sensor node that generates random data packets.
-    Includes a simple checksum for basic error detection.
-    """
-    
-    def __init__(self, name):
+    def init(self, name, data_func, bus):
         self.name = name
+        self.data_func = data_func  
+        self.bus = bus  
 
-    def generate_data(self):
-        """
-        Create a random sensor reading and generate a packet with a checksum.
-        """
-        value = round(random.uniform(0, 100), 2)
-        data = f"{self.name}_data: {value}"
-        checksum = self.compute_checksum(data)
-        return {"data": data, "checksum": checksum}
+    def generate_message(self):
+        data = self.data_func()
+        checksum = sum(ord(c) for c in data) % 256  
+        return f"{self.name}:{data}:{checksum}"
 
-    def compute_checksum(self, data):
-        """
-        Compute a basic checksum by summing the ASCII values of the characters.
-        """
-        return sum(ord(char) for char in data)
+    def send(self):
+        message = self.generate_message()
+        
+        # Simulate a 10% chance of corruption
+        if random.random() < 0.1:
+            message = message[:-1] + chr(random.randint(0, 255)) 
 
-    def send_message(self):
-        """
-        Send a message to the CAN bus, with a chance of random corruption.
-        """
-        packet = self.generate_data()
-        if random.random() < 0.2:
-            packet["data"] += "_corrupt"  # Simulate corruption
-        can_bus.put(packet)
-        print(f"{self.name} sent: {packet['data']}")
+        self.bus.send(message)
 
 
-class Controller:
-    """
-    Simulates a central controller that receives and validates messages from sensors.
-    Handles message errors and retries if needed.
-    """
-    
-    def __init__(self):
-        self.log = []
+C. src/central_controller.py (Controller)
 
-    def receive_messages(self):
-        """
-        Process all messages in the CAN bus queue, checking for corruption.
-        """
-        while not can_bus.empty():
-            packet = can_bus.get()
-            data, checksum = packet["data"], packet["checksum"]
+Handles message verification, detects errors, and requests retries.
+
+import time
+
+class CentralController:
+    def init(self, bus):
+        self.bus = bus  
+
+    def check_message(self, message):
+        try:
+            node, data, received_checksum = message.rsplit(":", 2)
+            received_checksum = int(received_checksum)
+            computed_checksum = sum(ord(c) for c in data) % 256 
             
-            if self.verify_checksum(data, checksum):
-                self.log.append(f" Received valid message: {data}")
-            else:
-                self.log.append(f" Error detected! Corrupted message: {data}")
-                self.retry_message(data)
+            if received_checksum != computed_checksum:
+                print(f"Error detected in message from {node}. Requesting retry...")
+                return False
+            print(f"Received valid message from {node}: {data}")
+            return True
+        except ValueError:
+            print("Malformed message received. Ignoring.")
+            return False
 
-    def verify_checksum(self, data, expected_checksum):
-        """
-        Verify whether the received data matches the expected checksum.
-        """
-        computed_checksum = sum(ord(char) for char in data)
-        return computed_checksum == expected_checksum
-
-    def retry_message(self, data):
-        """
-        Retry sending the corrected message after removing corruption.
-        """
-        corrected_data = data.replace("_corrupt", "")
-        corrected_checksum = sum(ord(char) for char in corrected_data)
-        can_bus.put({"data": corrected_data, "checksum": corrected_checksum})
-        self.log.append(f" Retrying message: {corrected_data}")
+    def listen(self):
+        while True:
+            message = self.bus.receive()
+            if message:
+                if not self.check_message(message):  
+                    print("Requesting resend...")
+            time.sleep(1)
 
 
-# Initialize sensors and controller
+D. main.py (Runs the Simulation)
+
+Initializes sensors, the controller, and runs the program.
+
+import threading
+import time
+from src.sensor_node import SensorNode
+from src.central_controller import CentralController
+from src.message_bus import MessageBus
+
+# Sensor data functions
+def gps_data():
+    return f"GPS({random.uniform(-90, 90):.2f},{random.uniform(-180, 180):.2f})"
+
+def lidar_data():
+    return f"LIDAR({random.randint(1, 100)}m)"
+
+def proximity_data():
+    return f"PROX({random.choice(['Safe', 'Warning', 'Danger'])})"
+
+# Initialize message bus (simulated CAN bus)
+bus = MessageBus()
+# Create sensor nodes
 sensors = [
-    SensorNode("GPS"),
-    SensorNode("LiDAR"),
-    SensorNode("Proximity1"),
-    SensorNode("Proximity2")
+    SensorNode("GPS", gps_data, bus),
+    SensorNode("LiDAR", lidar_data, bus),
+    SensorNode("Prox1", proximity_data, bus),
+    SensorNode("Prox2", proximity_data, bus)
 ]
 
-controller = Controller()
+# Initialize and start the central controller
+controller = CentralController(bus)
+controller_thread = threading.Thread(target=controller.listen, daemon=True)
+controller_thread.start()
 
-# Simulate the CAN communication process
-for cycle in range(5):
-    print(f"\n Cycle {cycle + 1}")
+# Start sensors (simulate periodic message sending)
+while True:
     for sensor in sensors:
-        sensor.send_message()
-    time.sleep(1)
-    controller.receive_messages()
-
-# Output the communication log
-print("\n Communication Log:")
-for entry in controller.log:
-    print(entry)
-    
-''' CAN Bus Schematic (Conceptual Layout):
- Microcontroller (e.g., ESP32, Arduino, or STM32) as the Central Controller.
- Multiple Sensors: GPS, LiDAR, Proximity sensors.
- CAN Transceivers to handle CAN communication.
- Bus Termination Resistors at both ends of the CAN line.
-Connections:
- Sensors → CAN Transceivers → CAN High & CAN Low lines
- Transceivers → Microcontroller UART/SPI pins for data'''
-
+        sensor.send()
+        time.sleep(0.5)
